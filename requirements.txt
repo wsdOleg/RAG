@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+pydantic-settings
+python-multipart
+requests
+pypdf
+PyMuPDF
+python-docx
+striprtf
+openpyxl
+xlrd
+pillow
+pytesseract
+chromadb
+pytest
+httpx
