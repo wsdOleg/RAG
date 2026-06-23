@@ -40,6 +40,42 @@ def getDocument(documentId: str) -> dict:
     return documentService.sanitizeDocumentRecord(document)
 
 
+@router.patch("/{documentId}")
+async def updateDocument(
+    documentId: str,
+    title: str | None = Form(default=None),
+    documentType: str | None = Form(default=None),
+    vendor: str | None = Form(default=None),
+    contractNumber: str | None = Form(default=None),
+    validFrom: str | None = Form(default=None),
+    validTo: str | None = Form(default=None),
+    amount: str | None = Form(default=None),
+    currency: str | None = Form(default=None),
+    softwareName: str | None = Form(default=None),
+    licenseCount: str | None = Form(default=None),
+    comment: str | None = Form(default=None),
+) -> dict:
+    document = documentService.updateDocument(
+        documentId,
+        {
+            "title": title,
+            "documentType": documentType,
+            "vendor": vendor,
+            "contractNumber": contractNumber,
+            "validFrom": validFrom,
+            "validTo": validTo,
+            "amount": amount,
+            "currency": currency,
+            "softwareName": softwareName,
+            "licenseCount": licenseCount,
+            "comment": comment,
+        },
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return documentService.sanitizeDocumentRecord(document)
+
+
 @router.get("/{documentId}/preview")
 def getDocumentPreview(documentId: str) -> dict:
     preview = documentService.getDocumentPreview(documentId)

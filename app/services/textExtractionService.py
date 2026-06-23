@@ -43,7 +43,7 @@ class TextExtractionService:
     def buildTextBlock(self, pageNumber: int | None, text: str, sourceType: str, extractionMethod: str, **extra: object) -> dict:
         return {
             "pageNumber": pageNumber,
-            "text": text,
+            "text": self.postprocessExtractedText(text, sourceType, extractionMethod),
             "sourceType": sourceType,
             "extractionMethod": extractionMethod,
             **extra,
@@ -178,3 +178,113 @@ class TextExtractionService:
                     lines.append(f"Строка {rowIndex + 1}: " + " | ".join(values))
         return "\n".join(lines)
 
+    def postprocessExtractedText(self, text: str, sourceType: str, extractionMethod: str) -> str:
+        normalizedText = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+        if sourceType == "ocr" or extractionMethod in {"pdf_text_layer", "docx_text"}:
+            normalizedText = self.removeServiceLines(normalizedText)
+            normalizedText = self.normalizeLegalText(normalizedText)
+        return normalizedText.strip()
+
+    def removeServiceLines(self, text: str) -> str:
+        keptLines: list[str] = []
+        for rawLine in text.split("\n"):
+            line = rawLine.strip()
+            if not line:
+                keptLines.append("")
+                continue
+            lowerLine = line.lower()
+            if "передан через диадок" in lowerLine:
+                continue
+            if re.fullmatch(r"страница\s+\d+\s+из\s+\d+", lowerLine):
+                continue
+            if re.fullmatch(r"[\dA-Za-zА-Яа-я+\-=/|]{10,}", line) and not re.search(r"[А-Яа-яЁё]{3,}", line):
+                continue
+            if re.fullmatch(r"[_\-/\\=|`~^]+", line):
+                continue
+            if len(line) <= 2 and not re.search(r"\d", line):
+                continue
+            keptLines.append(line)
+        return "\n".join(keptLines)
+
+    def normalizeLegalText(self, text: str) -> str:
+        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
+        paragraphs: list[str] = []
+        currentParagraph = ""
+
+        for line in lines:
+            if not line:
+                if currentParagraph:
+                    paragraphs.append(self.normalizeLegalLine(currentParagraph))
+                    currentParagraph = ""
+                continue
+
+            if self.isStandaloneLegalLine(line):
+                if currentParagraph:
+                    paragraphs.append(self.normalizeLegalLine(currentParagraph))
+                    currentParagraph = ""
+                paragraphs.append(self.normalizeLegalLine(line))
+                continue
+
+            if not currentParagraph:
+                currentParagraph = line
+                continue
+
+            if self.shouldMergeLegalLines(currentParagraph, line):
+                currentParagraph = f"{currentParagraph} {line.lstrip('-–— ')}"
+            else:
+                paragraphs.append(self.normalizeLegalLine(currentParagraph))
+                currentParagraph = line
+
+        if currentParagraph:
+            paragraphs.append(self.normalizeLegalLine(currentParagraph))
+
+        compactParagraphs: list[str] = []
+        for paragraph in paragraphs:
+            cleanedParagraph = paragraph.strip()
+            if not cleanedParagraph:
+                continue
+            compactParagraphs.append(cleanedParagraph)
+        return "\n\n".join(compactParagraphs)
+
+    def normalizeLegalLine(self, text: str) -> str:
+        normalizedText = re.sub(r"\s+", " ", text).strip()
+        replacements = {
+            "Ne ": "№ ",
+            " Nе ": " № ",
+            " Nе": " №",
+            "No ": "№ ",
+            "ct. ": "ст. ",
+            "cr. ": "ст. ",
+            "r. ": "г. ",
+            "66 этом": "об этом",
+            "66 этом ": "об этом ",
+            "Saa5": "SaaS",
+        }
+        for sourceText, targetText in replacements.items():
+            normalizedText = normalizedText.replace(sourceText, targetText)
+        normalizedText = re.sub(r"\bN[eoо]\s*(\d)", r"№ \1", normalizedText)
+        normalizedText = re.sub(r"\bст\.\s*(\d)", r"ст. \1", normalizedText)
+        normalizedText = normalizedText.replace(" ,", ",").replace(" .", ".").replace(" :", ":").replace(" ;", ";")
+        normalizedText = re.sub(r"([А-Яа-яЁё])\s{2,}([А-Яа-яЁё])", r"\1 \2", normalizedText)
+        normalizedText = re.sub(r"\s+([,.;:])", r"\1", normalizedText)
+        return normalizedText.strip()
+
+    def isStandaloneLegalLine(self, line: str) -> bool:
+        if re.match(r"^\d+(\.\d+)*\.?$", line):
+            return True
+        if re.match(r"^\d+(\.\d+)+\s", line):
+            return True
+        if re.match(r"^(договор|соглашение|акт|приложение)\b", line.lower()):
+            return True
+        if re.match(r"^[А-ЯЁA-Z][А-ЯЁA-Z0-9 №«»\"().,-]{8,}$", line):
+            return True
+        return False
+
+    def shouldMergeLegalLines(self, currentLine: str, nextLine: str) -> bool:
+        if self.isStandaloneLegalLine(nextLine):
+            return False
+        if re.match(r"^\d+(\.\d+)+\s", nextLine):
+            return False
+        if currentLine.endswith((".", "!", "?", ";", ":")):
+            return False
+        return True

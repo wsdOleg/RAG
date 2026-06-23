@@ -3,7 +3,9 @@ import mimetypes
 import re
 import shutil
 import tempfile
+import threading
 import zipfile
+from collections import Counter
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -17,7 +19,7 @@ from app.services.chunkService import ChunkService
 from app.services.chromaStoreService import ChromaStoreService
 from app.services.textExtractionService import TextExtractionError, TextExtractionService
 from app.utils.formatting import formatAmount, formatDate, formatDocumentType, formatStatus, formatVendor
-from app.utils.status import calculateBusinessStatus
+from app.utils.status import calculateBusinessStatus, parseDateValue
 
 
 class DocumentService:
@@ -59,6 +61,9 @@ class DocumentService:
         fileSize = await self.saveUploadToPath(file, filePath, self.settings.maxUploadMb)
         documentRecord = self.buildDocumentRecord(documentId, file, filePath, formData, fileSize)
         self.saveDocumentRecord(documentRecord)
+        if self.settings.processDocumentsInBackground:
+            self.startBackgroundProcessing(documentId)
+            return self.sanitizeDocumentRecord(documentRecord)
         processedRecord = self.processDocument(documentRecord)
         return self.sanitizeDocumentRecord(processedRecord)
 
@@ -71,6 +76,7 @@ class DocumentService:
                 overlap=self.settings.overlapChars,
             )
             recordWithContent = dict(documentRecord)
+            recordWithContent = self.applyExtractedMetadata(recordWithContent, extractedBlocks)
             recordWithContent["processingStatus"] = "indexed"
             recordWithContent["updatedAt"] = self.getNowIso()
             recordWithContent["businessStatus"] = calculateBusinessStatus(recordWithContent.get("validTo"))
@@ -94,6 +100,12 @@ class DocumentService:
         except TextExtractionError as error:
             documentRecord["processingStatus"] = "failed"
             documentRecord["processingError"] = str(error)
+            documentRecord["updatedAt"] = self.getNowIso()
+            self.saveDocumentRecord(documentRecord)
+            return documentRecord
+        except Exception as error:
+            documentRecord["processingStatus"] = "failed"
+            documentRecord["processingError"] = f"Ошибка индексации: {error}"
             documentRecord["updatedAt"] = self.getNowIso()
             self.saveDocumentRecord(documentRecord)
             return documentRecord
@@ -123,8 +135,12 @@ class DocumentService:
             "vendor": formatVendor(documentRecord.get("vendor")),
             "validTo": formatDate(documentRecord.get("validTo")),
             "amount": formatAmount(documentRecord.get("amount"), documentRecord.get("currency"), emptyText="-"),
+            "documentDate": formatDate(documentRecord.get("documentDate"), emptyText="-"),
+            "customer": documentRecord.get("customer"),
+            "serviceTerm": documentRecord.get("serviceTerm"),
             "businessStatus": formatStatus(documentRecord.get("businessStatus")),
             "processingStatus": documentRecord.get("processingStatus"),
+            "processingError": documentRecord.get("processingError"),
             "shortSummary": documentRecord.get("shortSummary"),
             "blocks": documentRecord.get("extractedBlocks") or [],
             "chunks": documentRecord.get("chunks") or [],
@@ -265,7 +281,55 @@ class DocumentService:
         if not documentRecord:
             return None
         self.chromaStoreService.deleteDocument(documentId)
-        return self.processDocument(documentRecord)
+        reindexRecord = dict(documentRecord)
+        for fieldName in (
+            "vendor",
+            "contractNumber",
+            "validFrom",
+            "validTo",
+            "amount",
+            "softwareName",
+            "licenseCount",
+            "documentDate",
+            "customer",
+            "serviceTerm",
+        ):
+            reindexRecord[fieldName] = None
+        reindexRecord["processingStatus"] = "processing"
+        reindexRecord["processingError"] = None
+        reindexRecord["shortSummary"] = None
+        reindexRecord["extractedBlocks"] = []
+        reindexRecord["chunks"] = []
+        reindexRecord["pageCount"] = 0
+        reindexRecord["updatedAt"] = self.getNowIso()
+        self.saveDocumentRecord(reindexRecord)
+        if self.settings.processDocumentsInBackground:
+            self.startBackgroundProcessing(documentId)
+            return reindexRecord
+        return self.processDocument(reindexRecord)
+
+    def updateDocument(self, documentId: str, formData: dict) -> dict | None:
+        documentRecord = self.getDocument(documentId)
+        if not documentRecord:
+            return None
+
+        updatedRecord = dict(documentRecord)
+        updatedRecord["title"] = (formData.get("title") or updatedRecord.get("title") or Path(updatedRecord.get("fileName") or "document").stem).strip()
+        updatedRecord["documentType"] = formData.get("documentType") or updatedRecord.get("documentType") or "document"
+        updatedRecord["vendor"] = self.normalizeOptionalValue(formData.get("vendor"))
+        updatedRecord["contractNumber"] = self.normalizeOptionalValue(formData.get("contractNumber"))
+        updatedRecord["validFrom"] = self.normalizeOptionalValue(formData.get("validFrom"))
+        updatedRecord["validTo"] = self.normalizeOptionalValue(formData.get("validTo"))
+        updatedRecord["amount"] = self.parseAmount(formData.get("amount"))
+        updatedRecord["currency"] = self.normalizeOptionalValue(formData.get("currency")) or "RUB"
+        updatedRecord["softwareName"] = self.normalizeOptionalValue(formData.get("softwareName"))
+        updatedRecord["licenseCount"] = int(formData["licenseCount"]) if str(formData.get("licenseCount") or "").strip().isdigit() else None
+        updatedRecord["comment"] = self.normalizeOptionalValue(formData.get("comment"))
+        updatedRecord["businessStatus"] = calculateBusinessStatus(updatedRecord.get("validTo"))
+        updatedRecord["updatedAt"] = self.getNowIso()
+        self.saveDocumentRecord(updatedRecord)
+        self.syncDocumentStore(updatedRecord)
+        return updatedRecord
 
     def getStats(self) -> dict:
         records = [self.getDocument(record["id"]) for record in self.getDocuments()]
@@ -323,6 +387,9 @@ class DocumentService:
             "extractedBlocks": [],
             "chunks": [],
             "pageCount": 0,
+            "documentDate": None,
+            "customer": None,
+            "serviceTerm": None,
         }
 
     def buildChunkRecords(self, documentRecord: dict, chunks: list[dict]) -> list[dict]:
@@ -354,6 +421,21 @@ class DocumentService:
             encoding="utf-8",
         )
 
+    def startBackgroundProcessing(self, documentId: str) -> None:
+        threading.Thread(target=self.processDocumentById, args=(documentId,), daemon=True).start()
+
+    def processDocumentById(self, documentId: str) -> None:
+        documentRecord = self.getDocument(documentId)
+        if not documentRecord:
+            return
+        self.processDocument(documentRecord)
+
+    def syncDocumentStore(self, documentRecord: dict) -> None:
+        self.chromaStoreService.deleteDocument(documentRecord["id"])
+        self.chromaStoreService.saveDocumentMetadata(documentRecord)
+        if documentRecord.get("chunks"):
+            self.chromaStoreService.saveDocumentChunks(documentRecord, documentRecord["chunks"])
+
     def sanitizeDocumentRecord(self, documentRecord: dict) -> dict:
         return {
             "id": documentRecord["id"],
@@ -372,7 +454,11 @@ class DocumentService:
             "softwareName": documentRecord.get("softwareName"),
             "licenseCount": documentRecord.get("licenseCount"),
             "comment": documentRecord.get("comment"),
+            "documentDate": documentRecord.get("documentDate"),
+            "customer": documentRecord.get("customer"),
+            "serviceTerm": documentRecord.get("serviceTerm"),
             "processingStatus": documentRecord.get("processingStatus"),
+            "processingError": documentRecord.get("processingError"),
             "businessStatus": documentRecord.get("businessStatus"),
             "createdAt": documentRecord.get("createdAt"),
             "updatedAt": documentRecord.get("updatedAt"),
@@ -424,7 +510,13 @@ class DocumentService:
     def validateStoredFile(self, fileName: str) -> None:
         extension = Path(fileName).suffix.lower()
         if extension not in self.allowedExtensions:
-            raise HTTPException(status_code=415, detail=f"Неподдерживаемый тип файла: {extension or 'без расширения'}")
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    f"Неподдерживаемый тип файла: {extension or 'без расширения'}. "
+                    f"Поддерживаются: {self.getSupportedExtensionsText()}"
+                ),
+            )
 
     def validateArchiveEntries(self, archive: zipfile.ZipFile) -> None:
         members = archive.infolist()
@@ -453,6 +545,12 @@ class DocumentService:
             raise HTTPException(status_code=400, detail="Архив содержит небезопасные пути")
         return normalized.as_posix()
 
+    def normalizeOptionalValue(self, value: object) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
     def parseAmount(self, value: object) -> float | None:
         if value in {None, "", "-", "None", "null", "undefined"}:
             return None
@@ -464,3 +562,230 @@ class DocumentService:
         if amount <= 0:
             return None
         return float(amount)
+
+    def getSupportedExtensionsText(self) -> str:
+        return ", ".join(extension.lstrip(".").upper() for extension in sorted(self.allowedExtensions))
+
+    def applyExtractedMetadata(self, documentRecord: dict, extractedBlocks: list[dict]) -> dict:
+        enrichedRecord = dict(documentRecord)
+        contractNumber = self.extractContractNumber(extractedBlocks)
+        documentDate = self.extractDocumentDate(extractedBlocks)
+        executorName = self.extractPartyName(extractedBlocks, "Исполнитель")
+        customerName = self.extractPartyName(extractedBlocks, "Заказчик")
+        amount = self.extractContractAmount(extractedBlocks)
+        serviceTerm = self.extractServiceTerm(extractedBlocks)
+        explicitEndDate = self.extractExplicitEndDate(extractedBlocks)
+        softwareName = self.extractSoftwareName(extractedBlocks)
+
+        enrichedRecord["contractNumber"] = contractNumber or enrichedRecord.get("contractNumber")
+        enrichedRecord["documentDate"] = documentDate or enrichedRecord.get("documentDate")
+        enrichedRecord["validFrom"] = documentDate or enrichedRecord.get("validFrom")
+        enrichedRecord["vendor"] = executorName or enrichedRecord.get("vendor")
+        enrichedRecord["customer"] = customerName or enrichedRecord.get("customer")
+        enrichedRecord["amount"] = amount if amount is not None else enrichedRecord.get("amount")
+        enrichedRecord["serviceTerm"] = serviceTerm or enrichedRecord.get("serviceTerm")
+        if explicitEndDate:
+            enrichedRecord["validTo"] = explicitEndDate
+        elif serviceTerm:
+            enrichedRecord["validTo"] = None
+        if softwareName:
+            enrichedRecord["softwareName"] = softwareName
+        return enrichedRecord
+
+    def extractContractNumber(self, extractedBlocks: list[dict]) -> str | None:
+        for block in extractedBlocks[:4]:
+            text = block.get("text") or ""
+            match = re.search(r"договор\s*№\s*(\d{3,})", text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
+
+    def extractDocumentDate(self, extractedBlocks: list[dict]) -> str | None:
+        weightedDates: list[tuple[str, int]] = []
+        for block in extractedBlocks:
+            text = block.get("text") or ""
+            normalizedText = self.normalizeBlockText(text)
+            if re.search(r"(передан через диадок|дата и время получения протокола|\bотправлен\b|\bдоставлен\b)", normalizedText):
+                continue
+            for match in re.finditer(r"дат[аы]\s+подписани[яе][^\n]{0,80}?(\d{2}[.\-/]\d{2}[.\-/]\d{2,4})", text, re.IGNORECASE):
+                normalizedDate = self.normalizeDateString(match.group(1))
+                if normalizedDate:
+                    weightedDates.append((normalizedDate, 9))
+            for match in re.finditer(r"договор[^\n]{0,120}?\sот\s*(\d{2}[.\-/]\d{2}[.\-/]\d{2,4})", text, re.IGNORECASE):
+                normalizedDate = self.normalizeDateString(match.group(1))
+                if normalizedDate:
+                    weightedDates.append((normalizedDate, 8))
+            for match in re.finditer(r"г\.\s*[А-Яа-яA-Za-zёЁ-]{2,30}\s+(\d{2}[.\-/]\d{2}[.\-/]\d{2,4})", text):
+                normalizedDate = self.normalizeDateString(match.group(1))
+                if normalizedDate:
+                    weightedDates.append((normalizedDate, 7))
+            for match in re.finditer(r"договор[^\n]{0,80}?(?:от|om)\s*(\d{2}[.\-/]\d{2}[.\-/]\d{4})", text, re.IGNORECASE):
+                normalizedDate = self.normalizeDateString(match.group(1))
+                if normalizedDate:
+                    weightedDates.append((normalizedDate, 5))
+            for match in re.finditer(r"(\d{2}[.\-/]\d{2}[.\-/]\d{4})", text):
+                normalizedDate = self.normalizeDateString(match.group(1))
+                if normalizedDate:
+                    weightedDates.append((normalizedDate, 1))
+        if not weightedDates:
+            return None
+        counter: Counter[str] = Counter()
+        for dateValue, weight in weightedDates:
+            counter[dateValue] += weight
+        return counter.most_common(1)[0][0]
+
+    def normalizeDateString(self, value: str) -> str | None:
+        normalizedValue = str(value).replace("/", ".").replace("-", ".").strip()
+        parsedDate = parseDateValue(normalizedValue)
+        if not parsedDate:
+            return None
+        return parsedDate.strftime("%Y-%m-%d")
+
+    def extractContractAmount(self, extractedBlocks: list[dict]) -> float | None:
+        prioritizedBlocks = sorted(
+            extractedBlocks,
+            key=lambda block: 1 if any(marker in (block.get("text") or "").lower() for marker in ("стоимость", "итого", "цена договора", "спецификац")) else 0,
+            reverse=True,
+        )
+        for block in prioritizedBlocks:
+            text = block.get("text") or ""
+            for pattern in (
+                r"стоимость[^\n]{0,160}?составляет\s+(\d[\d\s]{2,18})(?:[,.](\d{2}))?",
+                r"цена[^\n]{0,120}?договора[^\n]{0,80}?(\d[\d\s]{2,18})(?:[,.](\d{2}))?",
+                r"итого[, ]*руб\.?\s*(\d[\d\s]{2,18})(?:[,.](\d{2}))?",
+            ):
+                match = re.search(pattern, text, re.IGNORECASE)
+                if not match:
+                    continue
+                amountText = match.group(1)
+                decimalPart = match.group(2)
+                normalizedAmount = f"{amountText}.{decimalPart}" if decimalPart else amountText
+                amountValue = self.parseAmount(normalizedAmount)
+                if amountValue is not None:
+                    return amountValue
+        return None
+
+    def extractServiceTerm(self, extractedBlocks: list[dict]) -> str | None:
+        for block in extractedBlocks:
+            text = re.sub(r"\s+", " ", block.get("text") or "").strip()
+            match = re.search(
+                r"(в течение\s+\d+\s*\([^)]+\)\s*календарных\s+месяцев\s+с\s+момента\s+предоставления\s+доступа)",
+                text,
+                re.IGNORECASE,
+            )
+            if match:
+                return match.group(1).strip()
+        return None
+
+    def extractExplicitEndDate(self, extractedBlocks: list[dict]) -> str | None:
+        for block in extractedBlocks:
+            text = re.sub(r"\s+", " ", block.get("text") or "").strip()
+            match = re.search(r"(?:действует|срок[^\n]{0,50}|до)\s+до?\s*(\d{2}[.\-/]\d{2}[.\-/]\d{4})", text, re.IGNORECASE)
+            if not match:
+                continue
+            normalizedDate = self.normalizeDateString(match.group(1))
+            if normalizedDate:
+                return normalizedDate
+        return None
+
+    def extractSoftwareName(self, extractedBlocks: list[dict]) -> str | None:
+        for block in extractedBlocks:
+            text = block.get("text") or ""
+            match = re.search(r"платформ[аеы]\s+[«\"]([^»\"]+)[»\"]", text, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return None
+
+    def extractPartyName(self, extractedBlocks: list[dict], roleName: str) -> str | None:
+        for block in extractedBlocks[:6]:
+            extractedName = self.extractNamedParty(block.get("text") or "", roleName)
+            if extractedName and self.isLikelyOrganizationName(extractedName):
+                return extractedName
+        requisitesBlock = self.findRequisitesBlock(extractedBlocks)
+        if requisitesBlock:
+            extractedName = self.extractPartyFromRequisites(requisitesBlock.get("text") or "", roleName)
+            if extractedName and self.isLikelyOrganizationName(extractedName):
+                return extractedName
+        return None
+
+    def extractNamedParty(self, text: str, roleName: str) -> str | None:
+        normalizedRole = roleName.lower()
+        markerMatch = re.search(rf"именуем[а-я\s]+[«\"]?{normalizedRole}[»\"]?", text, re.IGNORECASE)
+        if not markerMatch:
+            return None
+        searchWindow = text[:markerMatch.start()][-700:]
+        if normalizedRole == "заказчик":
+            splitMatch = re.search(r"(?:с одной стороны,\s*и|,\s*и)\s*(.+)$", searchWindow, re.IGNORECASE | re.DOTALL)
+            if splitMatch:
+                searchWindow = splitMatch.group(1)
+        elif normalizedRole == "исполнитель":
+            splitIndex = searchWindow.lower().find("с одной стороны")
+            if splitIndex > 0:
+                searchWindow = searchWindow[:splitIndex]
+        organizationPatterns = [
+            r"Федеральное государственное бюджетное образовательное учреждение[^\n]{10,260}?«[^»]+»(?:\s*\([^)]{1,40}\))?",
+            r"Общество с ограниченной ответственностью[^\n]{0,140}?«[^»]+»(?:\s*\([^)]{1,40}\))?",
+            r'ООО\s+["«][^"»]+["»](?:\s*\([^)]{1,40}\))?',
+            r'АО\s+["«][^"»]+["»](?:\s*\([^)]{1,40}\))?',
+            r'ПАО\s+["«][^"»]+["»](?:\s*\([^)]{1,40}\))?',
+            r"Тюменский индустриальный университет(?:\s*\([^)]{1,40}\))?",
+        ]
+        for pattern in organizationPatterns:
+            matches = list(re.finditer(pattern, searchWindow, re.IGNORECASE | re.DOTALL))
+            if matches:
+                return self.cleanPartyName(matches[-1].group(0))
+        return None
+
+    def findRequisitesBlock(self, extractedBlocks: list[dict]) -> dict | None:
+        for block in extractedBlocks:
+            text = self.normalizeBlockText(block.get("text") or "")
+            if "реквизиты и подписи сторон" in text:
+                return block
+        for block in extractedBlocks:
+            text = self.normalizeBlockText(block.get("text") or "")
+            if "инн" in text and "бик" in text and "заказчик" in text:
+                return block
+        return None
+
+    def extractPartyFromRequisites(self, text: str, roleName: str) -> str | None:
+        normalizedText = re.sub(r"\s+", " ", text)
+        rolePattern = "заказчик" if roleName.lower() == "заказчик" else "исполнитель"
+        if rolePattern not in normalizedText.lower():
+            return None
+        for pattern in (
+            r"Федеральное государственное бюджетное образовательное учреждение[^\n]{10,260}?«[^»]+»(?:\s*\([^)]{1,40}\))?",
+            r"Общество с ограниченной ответственностью[^\n]{0,140}?«[^»]+»(?:\s*\([^)]{1,40}\))?",
+            r'ООО\s+["«][^"»]+["»](?:\s*\([^)]{1,40}\))?',
+        ):
+            matches = list(re.finditer(pattern, normalizedText, re.IGNORECASE))
+            if not matches:
+                continue
+            if rolePattern == "заказчик" and len(matches) >= 2:
+                return self.cleanPartyName(matches[-1].group(0))
+            return self.cleanPartyName(matches[0].group(0))
+        return None
+
+    def cleanPartyName(self, value: str) -> str:
+        cleanedValue = re.sub(r"\s+", " ", value).strip(" .,:;`'\"|-")
+        cleanedValue = cleanedValue.replace("(THY)", "(ТИУ)")
+        cleanedValue = cleanedValue.replace("(TNY)", "(ТИУ)")
+        cleanedValue = cleanedValue.replace("(THU)", "(ТИУ)")
+        cleanedValue = cleanedValue.replace("‘", " ").replace("`", " ")
+        return re.sub(r"\s+", " ", cleanedValue).strip()
+
+    def isLikelyOrganizationName(self, value: str) -> bool:
+        normalizedValue = self.normalizeBlockText(value)
+        organizationMarkers = (
+            "ооо",
+            "общество с ограниченной ответственностью",
+            "федеральное государственное",
+            "университет",
+            "институт",
+            "учреждение",
+            "инвенторус",
+            "тиу",
+        )
+        return any(marker in normalizedValue for marker in organizationMarkers)
+
+    def normalizeBlockText(self, value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "").lower().replace("ё", "е")).strip()

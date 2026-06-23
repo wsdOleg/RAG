@@ -25,10 +25,9 @@ def parseDateValue(value: object) -> date | None:
     text = str(value).strip()
     if not text:
         return None
-    for parser in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%d.%m.%Y"):
+    for parser in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%d.%m.%Y", "%d.%m.%y"):
         try:
             return datetime.strptime(text[:19], parser).date()
         except ValueError:
             continue
     return None
-

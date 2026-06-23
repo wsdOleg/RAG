@@ -25,6 +25,10 @@ class SessionService:
             "updatedAt": self.getNowIso(),
             "lastDocumentId": None,
             "lastDocumentTitle": None,
+            "lastCollectionDocumentIds": [],
+            "lastCollectionMode": False,
+            "pendingClarification": None,
+            "clarificationCount": 0,
             "messages": [],
         }
         self.saveSession(sessionData)
@@ -59,6 +63,23 @@ class SessionService:
     def updateLastDocument(self, sessionData: dict, documentId: str | None, documentTitle: str | None) -> None:
         sessionData["lastDocumentId"] = documentId
         sessionData["lastDocumentTitle"] = documentTitle
+        sessionData["lastCollectionMode"] = False
+        self.saveSession(sessionData)
+
+    def updateLastCollection(self, sessionData: dict, documentIds: list[str]) -> None:
+        sessionData["lastCollectionDocumentIds"] = documentIds
+        sessionData["lastCollectionMode"] = bool(documentIds)
+        self.saveSession(sessionData)
+
+    def setPendingClarification(self, sessionData: dict, clarificationData: dict) -> None:
+        sessionData["pendingClarification"] = clarificationData
+        sessionData["clarificationCount"] = int(sessionData.get("clarificationCount") or 0) + 1
+        self.saveSession(sessionData)
+
+    def clearPendingClarification(self, sessionData: dict, resetCount: bool = False) -> None:
+        sessionData["pendingClarification"] = None
+        if resetCount:
+            sessionData["clarificationCount"] = 0
         self.saveSession(sessionData)
 
     def getSessionPath(self, sessionId: str) -> Path:

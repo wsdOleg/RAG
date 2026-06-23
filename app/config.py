@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     maxZipEntryMb: int = Field(default=8, validation_alias=AliasChoices("MAX_ZIP_ENTRY_MB", "maxZipEntryMb"))
     maxZipEntries: int = Field(default=100, validation_alias=AliasChoices("MAX_ZIP_ENTRIES", "maxZipEntries"))
     maxImagePixels: int = Field(default=40_000_000, validation_alias=AliasChoices("MAX_IMAGE_PIXELS", "maxImagePixels"))
+    processDocumentsInBackground: bool = Field(default=True, validation_alias=AliasChoices("PROCESS_DOCUMENTS_IN_BACKGROUND", "processDocumentsInBackground"))
 
     ocrEnabled: bool = Field(default=True, validation_alias=AliasChoices("OCR_ENABLED", "ocrEnabled"))
     ocrLang: str = Field(default="rus+eng", validation_alias=AliasChoices("OCR_LANG", "ocrLang"))
@@ -44,7 +45,7 @@ class Settings(BaseSettings):
     tessdataDir: str | None = Field(default=None, validation_alias=AliasChoices("TESSDATA_DIR", "tessdataDir"))
     ocrForceAllPdfPages: bool = Field(default=False, validation_alias=AliasChoices("OCR_FORCE_ALL_PDF_PAGES", "ocrForceAllPdfPages"))
     ocrMinTextLength: int = Field(default=20, validation_alias=AliasChoices("OCR_MIN_TEXT_LENGTH", "ocrMinTextLength"))
-    ocrRenderScale: float = Field(default=2.0, validation_alias=AliasChoices("OCR_RENDER_SCALE", "ocrRenderScale"))
+    ocrRenderScale: float = Field(default=1.8, validation_alias=AliasChoices("OCR_RENDER_SCALE", "ocrRenderScale"))
     ocrMaxPages: int = Field(default=50, validation_alias=AliasChoices("OCR_MAX_PAGES", "ocrMaxPages"))
 
     model_config = SettingsConfigDict(

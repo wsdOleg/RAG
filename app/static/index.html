@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAG модуль документов</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <h1>База договоров и документов (RAG)</h1>
+        <p>Загружайте договоры, просматривайте содержимое и задавайте вопросы AI Assistant по тексту, OCR и metadata.</p>
+      </div>
+      <div class="hero-actions">
+        <button class="primary-button primary-button-compact" type="button" id="openUploadButton">Загрузить документ</button>
+      </div>
+    </header>
+
+    <section class="stats-grid">
+      <article class="stat-card stat-card-total">
+        <span>Всего документов</span>
+        <strong id="totalDocuments">0</strong>
+      </article>
+      <article class="stat-card stat-card-active">
+        <span>Активные</span>
+        <strong id="activeDocuments">0</strong>
+      </article>
+      <article class="stat-card stat-card-expiring">
+        <span>Истекают скоро</span>
+        <strong id="expiringDocuments">0</strong>
+      </article>
+      <article class="stat-card stat-card-expired">
+        <span>Просрочено</span>
+        <strong id="expiredDocuments">0</strong>
+      </article>
+    </section>
+
+    <section class="panel main-panel">
+      <div class="segment-bar">
+        <button class="segment-button" type="button" id="openDocumentsPanelButton">Документы</button>
+        <button class="segment-button is-active" type="button" id="openChatPanelButton">AI Assistant (RAG)</button>
+      </div>
+
+      <section id="documentsPanel" class="workspace-panel hidden">
+        <div class="documents-toolbar documents-toolbar-top">
+          <input id="documentsSearch" type="search" placeholder="Поиск по названию, поставщику, типу, номеру договора...">
+          <div class="documents-toolbar-actions">
+            <button class="primary-button primary-button-compact" type="button" id="openUploadButtonInDocuments">Загрузить документ</button>
+            <button class="ghost-button" type="button" id="reloadDocumentsButton">Обновить</button>
+          </div>
+        </div>
+
+        <div class="table-wrap documents-table-wrap">
+          <table class="documents-table">
+            <thead>
+              <tr>
+                <th>Название</th>
+                <th>Тип</th>
+                <th>Поставщик</th>
+                <th>Срок</th>
+                <th>Сумма</th>
+                <th>Статус</th>
+                <th>Действия</th>
+              </tr>
+            </thead>
+            <tbody id="documentsTableBody">
+              <tr>
+                <td colspan="7" class="empty-state-cell">Документы еще не загружены.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="chatPanel" class="workspace-panel">
+        <div class="chat-toolbar">
+          <div class="context-chip" id="chatContextBadge">Контекст: все документы</div>
+          <div class="chat-toolbar-actions">
+            <button class="ghost-button" type="button" id="clearContextButton">Сбросить контекст</button>
+            <button class="ghost-button" type="button" id="refreshChatButton">Обновить чат</button>
+          </div>
+        </div>
+
+        <div class="chat-log" id="chatLog"></div>
+
+        <div class="quick-actions" id="quickActions">
+          <button type="button" data-question="Расскажи кратко про каждый загруженный файл">Что загружено?</button>
+          <button type="button" data-question="Какие документы просрочены?">Просроченные</button>
+          <button type="button" data-question="Что истекает скоро?">Истекают скоро</button>
+          <button type="button" data-question="Напиши общую сумму всех договоров и лицензий">Общая сумма</button>
+        </div>
+
+        <form class="chat-form" id="chatForm">
+          <textarea id="chatQuestion" rows="4" placeholder="Введите вопрос по документам, срокам, суммам, OCR или условиям договора..."></textarea>
+          <div class="chat-form-actions">
+            <div class="helper-text">Можно выбрать документ в списке и задать вопрос только по нему.</div>
+            <button class="primary-button" id="sendQuestionButton" type="submit">Отправить</button>
+          </div>
+        </form>
+      </section>
+    </section>
+  </div>
+
+  <dialog class="dialog" id="uploadDialog">
+    <form class="dialog-card medium-card" id="uploadForm" method="dialog">
+      <div class="dialog-header">
+        <div>
+          <h2>Загрузка документа</h2>
+          <p>После отправки окно можно сразу закрыть. Индексация продолжится в фоне.</p>
+        </div>
+        <button class="icon-button" type="button" id="closeUploadButton" aria-label="Закрыть">×</button>
+      </div>
+
+      <div class="form-grid">
+        <label class="full-width">
+          <span>Файл</span>
+          <input type="file" id="uploadFile" name="file" required accept=".pdf,.docx,.doc,.txt,.csv,.rtf,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp">
+          <small class="field-hint">Поддерживаемые типы: PDF, DOCX, DOC, TXT, CSV, RTF, XLSX, XLS, PNG, JPG, JPEG, WEBP, TIF, TIFF, BMP.</small>
+        </label>
+        <label>
+          <span>Название</span>
+          <input type="text" id="uploadTitle" name="title" placeholder="Если пусто, будет имя файла">
+        </label>
+        <label>
+          <span>Тип документа</span>
+          <select id="uploadDocumentType" name="documentType">
+            <option value="contract">Договор</option>
+            <option value="license">Лицензия</option>
+            <option value="agreement">Соглашение</option>
+            <option value="act">Акт</option>
+            <option value="appendix">Приложение</option>
+            <option value="invoice">Счет</option>
+            <option value="scan">Скан</option>
+            <option value="document" selected>Документ</option>
+          </select>
+        </label>
+        <label>
+          <span>Поставщик</span>
+          <input type="text" id="uploadVendor" name="vendor">
+        </label>
+        <label>
+          <span>Номер договора</span>
+          <input type="text" id="uploadContractNumber" name="contractNumber">
+        </label>
+        <label>
+          <span>Дата начала</span>
+          <input type="date" id="uploadValidFrom" name="validFrom">
+        </label>
+        <label>
+          <span>Дата окончания</span>
+          <input type="date" id="uploadValidTo" name="validTo">
+        </label>
+        <label>
+          <span>Сумма</span>
+          <input type="number" step="0.01" id="uploadAmount" name="amount">
+        </label>
+        <label>
+          <span>Валюта</span>
+          <select id="uploadCurrency" name="currency">
+            <option value="RUB" selected>RUB</option>
+            <option value="USD">USD</option>
+            <option value="EUR">EUR</option>
+          </select>
+        </label>
+        <label>
+          <span>Программный продукт</span>
+          <input type="text" id="uploadSoftwareName" name="softwareName">
+        </label>
+        <label>
+          <span>Количество лицензий</span>
+          <input type="number" id="uploadLicenseCount" name="licenseCount" min="0">
+        </label>
+        <label class="full-width">
+          <span>Комментарий</span>
+          <textarea id="uploadComment" name="comment" rows="3"></textarea>
+        </label>
+      </div>
+
+      <div class="dialog-actions">
+        <button class="ghost-button" type="button" id="cancelUploadButton">Отмена</button>
+        <button class="primary-button" type="submit" id="submitUploadButton">Отправить в индексацию</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog" id="previewDialog">
+    <div class="dialog-card large-card">
+      <div class="dialog-header">
+        <div>
+          <h2 id="previewTitle">Просмотр документа</h2>
+          <p id="previewMetaLine"></p>
+        </div>
+        <div class="dialog-header-actions">
+          <button class="ghost-button" type="button" id="editMetadataButton">Редактировать</button>
+          <button class="icon-button" type="button" id="closePreviewButton" aria-label="Закрыть">×</button>
+        </div>
+      </div>
+
+      <div class="preview-actions">
+        <a class="ghost-button link-button" id="openFileButton" target="_blank" rel="noopener noreferrer">Открыть файл</a>
+        <button class="ghost-button" type="button" id="sendPreviewToChatButton">Отправить в контекст чата</button>
+      </div>
+
+      <div class="preview-grid">
+        <section class="preview-section">
+          <h3>Метаданные</h3>
+          <dl class="metadata-list" id="previewMetadata"></dl>
+        </section>
+        <section class="preview-section">
+          <h3>Краткое содержание</h3>
+          <p class="summary-text" id="previewSummary"></p>
+          <p class="processing-error hidden" id="previewProcessingError"></p>
+        </section>
+        <section class="preview-section full-width">
+          <h3>Извлеченный текст и OCR</h3>
+          <div class="blocks-list" id="previewBlocks"></div>
+        </section>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="dialog" id="editDialog">
+    <form class="dialog-card medium-card" id="editForm" method="dialog">
+      <div class="dialog-header">
+        <div>
+          <h2>Редактирование metadata</h2>
+          <p>Изменения применятся сразу. Если документ уже индексирован, metadata обновится и в RAG.</p>
+        </div>
+        <button class="icon-button" type="button" id="closeEditButton" aria-label="Закрыть">×</button>
+      </div>
+
+      <input type="hidden" id="editDocumentId">
+
+      <div class="form-grid">
+        <label>
+          <span>Название</span>
+          <input type="text" id="editTitle" name="title">
+        </label>
+        <label>
+          <span>Тип документа</span>
+          <select id="editDocumentType" name="documentType">
+            <option value="contract">Договор</option>
+            <option value="license">Лицензия</option>
+            <option value="agreement">Соглашение</option>
+            <option value="act">Акт</option>
+            <option value="appendix">Приложение</option>
+            <option value="invoice">Счет</option>
+            <option value="scan">Скан</option>
+            <option value="document">Документ</option>
+          </select>
+        </label>
+        <label>
+          <span>Поставщик</span>
+          <input type="text" id="editVendor" name="vendor">
+        </label>
+        <label>
+          <span>Номер договора</span>
+          <input type="text" id="editContractNumber" name="contractNumber">
+        </label>
+        <label>
+          <span>Дата начала</span>
+          <input type="date" id="editValidFrom" name="validFrom">
+        </label>
+        <label>
+          <span>Дата окончания</span>
+          <input type="date" id="editValidTo" name="validTo">
+        </label>
+        <label>
+          <span>Сумма</span>
+          <input type="number" step="0.01" id="editAmount" name="amount">
+        </label>
+        <label>
+          <span>Валюта</span>
+          <select id="editCurrency" name="currency">
+            <option value="RUB">RUB</option>
+            <option value="USD">USD</option>
+            <option value="EUR">EUR</option>
+          </select>
+        </label>
+        <label>
+          <span>Программный продукт</span>
+          <input type="text" id="editSoftwareName" name="softwareName">
+        </label>
+        <label>
+          <span>Количество лицензий</span>
+          <input type="number" id="editLicenseCount" name="licenseCount" min="0">
+        </label>
+        <label class="full-width">
+          <span>Комментарий</span>
+          <textarea id="editComment" name="comment" rows="3"></textarea>
+        </label>
+      </div>
+
+      <div class="dialog-actions">
+        <button class="ghost-button" type="button" id="cancelEditButton">Отмена</button>
+        <button class="primary-button" type="submit" id="submitEditButton">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <template id="assistantMessageTemplate">
+    <article class="message assistant-message">
+      <div class="message-header">
+        <span>RAG Assistant</span>
+        <small class="message-source"></small>
+      </div>
+      <div class="message-body"></div>
+      <details class="message-details hidden">
+        <summary>Показать подробности</summary>
+        <div class="details-content"></div>
+      </details>
+    </article>
+  </template>
+
+  <template id="userMessageTemplate">
+    <article class="message user-message">
+      <div class="message-header">
+        <span>Вы</span>
+      </div>
+      <div class="message-body"></div>
+    </article>
+  </template>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

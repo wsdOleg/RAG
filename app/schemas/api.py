@@ -16,6 +16,7 @@ class AskResponse(BaseModel):
     sourceType: str
     sessionId: str
     citations: list[dict[str, Any]] = Field(default_factory=list)
+    clarification: dict[str, Any] | None = None
     usedLLM: bool = False
     usedVectorSearch: bool = False
     documentsOverview: list[dict[str, Any]] = Field(default_factory=list)
