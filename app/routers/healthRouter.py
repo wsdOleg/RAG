@@ -15,7 +15,7 @@ def getHealth() -> dict:
     ocrHealth = OcrService().getHealth()
     return {
         "status": "ok",
-        "service": "Standalone RAG Service",
+        "service": "RAG Module",
         "chroma": chromaHealth,
         "llm": llmHealth,
         "ocr": ocrHealth,
@@ -35,4 +35,3 @@ def getLlmHealth() -> dict:
 @router.get("/health/chroma")
 def getChromaHealth() -> dict:
     return ChromaStoreService().getHealth()
-

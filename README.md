@@ -1,6 +1,6 @@
-# Standalone RAG Service
+# RAG Module
 
-Я сделал отдельный RAG-микросервис на `FastAPI`, чтобы его можно было подключать к другой системе как готовый backend.
+Я сделал отдельный RAG-модуль на `FastAPI`, чтобы его можно было подключать к другой системе как готовый backend.
 
 ## Что это умеет
 
@@ -166,5 +166,4 @@ curl http://127.0.0.1:8010/api/health/chroma
 4. Открыть `GET /api/documents`
 5. Проверить `GET /api/documents/{id}/preview`
 6. Задать вопрос через `POST /api/rag/ask`
-
 

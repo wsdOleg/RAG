@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    appName: str = Field(default="Standalone RAG Service", validation_alias=AliasChoices("APP_NAME", "appName"))
+    appName: str = Field(default="RAG Module", validation_alias=AliasChoices("APP_NAME", "appName"))
     apiPrefix: str = Field(default="/api", validation_alias=AliasChoices("API_PREFIX", "apiPrefix"))
     corsOrigins: str = Field(default="http://localhost,http://127.0.0.1", validation_alias=AliasChoices("CORS_ORIGINS", "corsOrigins"))
 
